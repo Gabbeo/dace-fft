@@ -31,58 +31,49 @@ def own_fft(x, y):
         y_out = x_in
         
     # Main Stockham loop
-    # NOTE REVERSE LOOP
     for i in range(K):
-        # STRIDE PERMUTATION
-        # Permute_tensorprod_I(x, r, k, i)
-        n_p = dace.define_local([1], dtype=dace.int64)
-        I_len = dace.define_local([1], dtype=dace.int64)
+        # Calculate indices        
+        r_i = dace.define_local_scalar(dtype=dace.int64)
+        r_i_1 = dace.define_local_scalar(dtype=dace.int64)
+        r_k_1 = dace.define_local_scalar(dtype=dace.int64) 
+        r_k_i_1 = dace.define_local_scalar(dtype=dace.int64)
+
+        
         @dace.tasklet
         def calc_index():
-            n_p_o >> n_p[0]
-            I_len_o >> I_len[0]
-            n_p_o = R ** i
-            I_len_o = R ** (K - i - 1)
-    
+            # Permutations
+            r_i_o >> r_i
+            r_i_1_o >> r_i_1
+            r_k_1_o >> r_k_1
+            r_k_i_1_o >> r_k_i_1
+            
+            r_i_o = R ** i
+            r_i_1_o = R ** (i + 1)
+            r_k_i_1_o = R ** (K - i - 1)
+            r_k_1_o = R ** (K - 1)
+
+        # STRIDE PERMUTATION
         tmp_perm = dace.define_local([N], dtype=dtype)
-        @dace.map(_[0:R, 0:n_p[0], 0:I_len[0]])
+        @dace.map(_[0:R, 0:r_i, 0:r_k_i_1])
         def permute(ii, jj, kk):
-            I_len_in << I_len[0]
-            n_p_in << n_p[0]
-            y_in << y[I_len_in * (jj * R + ii) + kk]
-            tmp_out >> tmp_perm[I_len_in * (ii * n_p_in + jj) + kk]
+            r_k_i_1_in << r_k_i_1
+            r_i_in << r_i
+            y_in << y[r_k_i_1_in * (jj * R + ii) + kk]
+            tmp_out >> tmp_perm[r_k_i_1_in * (ii * r_i_in + jj) + kk]
     
             tmp_out = y_in
             
         # ---------------------------------------------------------------------
         # TWIDDLE FACTOR MULTIPLICATION
-        # D = Generate_twiddles(n, i, r, k, x.dtype, True)
         D = dace.define_local([N], dtype=dace.complex64)
-        L_q = dace.define_local([1], dtype=dace.int64)
-        Lq_rq = dace.define_local([1], dtype=dace.int64)
-        n_Lq = dace.define_local([1], dtype=dace.int64)
-        
-        @dace.tasklet
-        def calc_indices():
-            L_q_o >> L_q[0]
-            Lq_rq_o >> Lq_rq[0]
-            n_Lq_o >> n_Lq[0]
-            
-            L_q_o = R ** (i + 1)
-            Lq_rq_o = R ** i
-            n_Lq_o = R ** (K - i - 1)
-            
-            
-        @dace.map(_[0:R, 0:Lq_rq[0], 0:n_Lq[0]])
+        @dace.map(_[0:R, 0:r_i, 0:r_k_i_1])
         def generate_twiddles(ii, jj, kk):
-            L_q_in << L_q[0]
-            Lq_rq_in << Lq_rq[0]
-            n_Lq_in << n_Lq[0]
-            twiddle_o >> D[n_Lq_in * (ii * Lq_rq_in + jj) + kk]
-            twiddle_o = exp(dace.complex64(0, -2 * 3.14159265359 * ii * jj / L_q_in))
+            r_i_1_in << r_i_1
+            r_i_in << r_i
+            r_k_i_1_in << r_k_i_1
+            twiddle_o >> D[r_k_i_1_in * (ii * r_i_in + jj) + kk]
+            twiddle_o = exp(dace.complex64(0, -2 * 3.14159265359 * ii * jj / r_i_1_in))
             
-
-        # x = D_op(D, x, n)
         tmp_twid = dace.define_local([N], dtype=dtype)
         @dace.map(_[0:N])
         def twiddle_multiplication(i):
@@ -94,21 +85,13 @@ def own_fft(x, y):
 
         # ---------------------------------------------------------------------
         # Vector DFT multiplication
-        # x = A_tensorprod_I(dft_m, x, r, r_k_m1)
         tmp_y = dace.define_local([N, N], dtype=dace.complex64)
-        r_k_m1 = dace.define_local([1], dtype=dace.int64)
-        @dace.tasklet
-        def calc_index():
-            r_k_m1_out >> r_k_m1[0]
-            
-            r_k_m1_out = R ** (K - 1)
-        
-        @dace.map(_[0:r_k_m1[0], 0:R, 0:R])
+        @dace.map(_[0:r_k_1, 0:R, 0:R])
         def tensormult(ii, jj, kk):
-            r_k_m1_in << r_k_m1[0]
+            r_k_1_in << r_k_1
             dft_in << dft_mat[jj, kk]
-            tmp_in << tmp_twid[ii + r_k_m1_in * kk]
-            tmp_y_out >> tmp_y[ii + r_k_m1_in * jj, ii + r_k_m1_in * kk]
+            tmp_in << tmp_twid[ii + r_k_1_in * kk]
+            tmp_y_out >> tmp_y[ii + r_k_1_in * jj, ii + r_k_1_in * kk]
 
             tmp_y_out = dft_in * tmp_in
             
@@ -124,14 +107,14 @@ def own_fft(x, y):
         
 if __name__ == "__main__":
     print("==== Program start ====")
-    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "12"
     dace.Config.set('profiling', value=True)
-    dace.Config.set('treps', value=1)
+    dace.Config.set('treps', value=10)
 
     r = 2
     k = 2
     n = r ** k
-    print('FFT on real vector of length %d' % n)
+    print('FFT on vector of length %d' % n)
 
     N.set(n)
     R.set(r)
