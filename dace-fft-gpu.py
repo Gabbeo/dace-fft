@@ -112,7 +112,7 @@ if __name__ == "__main__":
     dace.Config.set('treps', value=10)
 
     r = 2
-    k = 8
+    k = 2
     n = r ** k
     print('FFT on vector of length %d' % n)
 
