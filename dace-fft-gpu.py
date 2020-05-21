@@ -1,130 +1,126 @@
 #!/bin/bash
 
-import numpy as np
 import dace
-from numpy.fft import fft
 import os
+import numpy as np
+from numpy.fft import fft
 
-
-N = dace.symbol('N')
-R = dace.symbol('R')
-K = dace.symbol('K')
+N, R, K, N_div_R = (dace.symbol(name) for name in ['N','R','K','N_div_R'])
 
 ############################################################################
-@dace.program(dace.complex64[N], dace.complex64[N])
+@dace.program(dace.complex128[N], dace.complex128[N])
 def own_fft(x, y):
-    dtype = dace.complex64
+    dtype = dace.complex128
     
     # Generate radix dft matrix
     dft_mat = dace.define_local([R, R], dtype=dtype)
     @dace.map(_[0:R, 0:R])
-    def dft_mat_gen(i, j):
-        omega >> dft_mat[i, j]
-        omega = exp(-dace.complex64(0, 2 * 3.14159265359 * i * j / R))
+    def dft_mat_gen(ii, jj):
+        omega >> dft_mat[ii, jj]
+        omega = exp(-dace.complex128(0, 2 * 3.14159265359 * ii * jj / R))
         
     tmp = dace.define_local([N], dtype=dtype)
     @dace.map(_[0:N])
-    def move_x_to_y(i):
-        x_in << x[i]
-        y_out >> y[i]
+    def move_x_to_y(ii):
+        x_in << x[ii]
+        y_out >> y[ii]
         
         y_out = x_in
         
+    # Calculate indices CPU
+    c_r_i = dace.define_local([K], dtype=dace.int64)
+    c_r_k_1 = dace.define_local([K], dtype=dace.int64)
+    c_r_k_i_1 = dace.define_local([K], dtype=dace.int64)
+    
+    @dace.map(_[0:K])
+    def calc_indices_cpu(ii):
+        c_r_i_out >> c_r_i[ii]
+        c_r_k_1_out >> c_r_k_1[ii]
+        c_r_k_i_1_out >> c_r_k_i_1[ii]
+        
+        c_r_i_out = R ** ii
+        c_r_k_1_out = R ** (K - 1)
+        c_r_k_i_1_out = R ** (K - ii - 1)
+        
+    # Calculate indices GPU
+    g_r_i = dace.define_local([K], dtype=dace.int64)
+    g_r_i_1 = dace.define_local([K], dtype=dace.int64)
+    g_r_k_1 = dace.define_local([K], dtype=dace.int64) 
+    g_r_k_i_1 = dace.define_local([K], dtype=dace.int64)
+    
+    @dace.map(_[0:K])
+    def calc_indices_cpu(ii):
+        g_r_i_out >> g_r_i[ii]
+        g_r_i_1_out >> g_r_i_1[ii]
+        g_r_k_1_out >> g_r_k_1[ii]
+        g_r_k_i_1_out >> g_r_k_i_1[ii]
+        
+        g_r_i_out = R ** ii
+        g_r_i_1_out = R ** (ii + 1)
+        g_r_k_1_out = R ** (K - 1)
+        g_r_k_i_1_out = R ** (K - ii - 1)
+        
     # Main Stockham loop
     for i in range(K):
-        # Calculate indices        
-        r_i[0] = dace.define_local([1], dtype=dace.int64)
-        r_i_1[0] = dace.define_local([1], dtype=dace.int64)
-        r_k_1[0] = dace.define_local([1], dtype=dace.int64) 
-        r_k_i_1[0] = dace.define_local([1], dtype=dace.int64)
-
-        
-        @dace.tasklet
-        def calc_index():
-            # Permutations
-            r_i_o >> r_i[0]
-            r_i_1_o >> r_i_1[0]
-            r_k_1_o >> r_k_1[0]
-            r_k_i_1_o >> r_k_i_1[0]
-            
-            r_i_o = R ** i
-            r_i_1_o = R ** (i + 1)
-            r_k_i_1_o = R ** (K - i - 1)
-            r_k_1_o = R ** (K - 1)
-
-        # STRIDE PERMUTATION
+        # STRIDE PERMUTATION AND TWIDDLE FACTOR MULTIPLICATION
         tmp_perm = dace.define_local([N], dtype=dtype)
-        @dace.map(_[0:R, 0:r_i[0], 0:r_k_i_1[0]])
+        @dace.map(_[0:R, 0:(R**i), 0:(R**(K-1))])
         def permute(ii, jj, kk):
-            r_k_i_1_in << r_k_i_1[0]
-            r_i_in << r_i[0]
+            r_k_i_1_in << g_r_k_i_1[i]
+            r_i_in << g_r_i[i]
+            r_i_1_in << g_r_i_1[i]
             y_in << y[r_k_i_1_in * (jj * R + ii) + kk]
             tmp_out >> tmp_perm[r_k_i_1_in * (ii * r_i_in + jj) + kk]
     
-            tmp_out = y_in
-            
-        # ---------------------------------------------------------------------
-        # TWIDDLE FACTOR MULTIPLICATION
-        D = dace.define_local([N], dtype=dace.complex64)
-        @dace.map(_[0:R, 0:r_i[0], 0:r_k_i_1[0]])
-        def generate_twiddles(ii, jj, kk):
-            r_i_1_in << r_i_1[0]
-            r_i_in << r_i[0]
-            r_k_i_1_in << r_k_i_1[0]
-            twiddle_o >> D[r_k_i_1_in * (ii * r_i_in + jj) + kk]
-            twiddle_o = exp(dace.complex64(0, -2 * 3.14159265359 * ii * jj / r_i_1_in))
-            
-        tmp_twid = dace.define_local([N], dtype=dtype)
-        @dace.map(_[0:N])
-        def twiddle_multiplication(i):
-            tmp_in << tmp_perm[i]
-            D_in << D[i]
-            tmp_out >> tmp_twid[i]
-            
-            tmp_out = tmp_in * D_in
+            tmp_out = y_in * exp(dace.complex128(0, -2 * 3.14159265359 * ii * jj / r_i_1_in))
+
 
         # ---------------------------------------------------------------------
         # Vector DFT multiplication
-        tmp_y = dace.define_local([N, N], dtype=dace.complex64)
-        @dace.map(_[0:r_k_1[0], 0:R, 0:R])
-        def tensormult(ii, jj, kk):
-            r_k_1_in << r_k_1[0]
-            dft_in << dft_mat[jj, kk]
-            tmp_in << tmp_twid[ii + r_k_1_in * kk]
-            tmp_y_out >> tmp_y[ii + r_k_1_in * jj, ii + r_k_1_in * kk]
+        # Need to use dace.symbol for N_div_R because it's executed before all
+        # indices are calculated, R**(K-1) is not valid here either.
+        x_packed = dace.define_local([R, N_div_R],dtype=dtype)
+        y_packed = dace.define_local([R, N_div_R],dtype=dtype)
+        @dace.map(_[0:R, c_r_k_1[i]])
+        def pack_matrices(ii, jj):
+            g_r_k_1_in << g_r_k_1[i]
+            tmp_in << tmp_perm[jj + ii * g_r_k_1_in]
+            x_packed_out >> x_packed[ii, jj]
+            
+            x_packed_out = tmp_in
+    
+        y_packed[:] = dft_mat @ x_packed
+            
+        @dace.map(_[0:R, c_r_k_1[i]])
+        def unpack_matrices(ii, jj):
+            g_r_k_1_in << g_r_k_1[i]
+            y_out >> y[jj + ii * g_r_k_1_in]
+            y_packed_in << y_packed[ii, jj]
+            
+            y_out = y_packed_in
 
-            tmp_y_out = dft_in * tmp_in
-            
-        tmp_red = dace.define_local([N], dtype=dtype)
-        dace.reduce(lambda a, b: a + b, tmp_y, tmp_red, axis=1, identity=0)
-        
-        @dace.map(_[0:N])
-        def move_to_y(i):
-            tmp_in << tmp_red[i]
-            y_out >> y[i]
-            
-            y_out = tmp_in
-        
 if __name__ == "__main__":
     print("==== Program start ====")
     os.environ["OMP_NUM_THREADS"] = "12"
     dace.Config.set('profiling', value=True)
-    dace.Config.set('treps', value=10)
+    dace.Config.set('treps', value=1000)
 
     r = 2
-    k = 2
+    k = 4
     n = r ** k
+    n_div_r = r ** (k - 1) # Equivalent to n // r
     print('FFT on vector of length %d' % n)
 
     N.set(n)
     R.set(r)
     K.set(k)
+    N_div_R.set(n_div_r)
 
-    X = np.random.rand(n).astype(np.complex64) + 1j * np.random.rand(n).astype(np.complex64) 
-    Y_own = np.zeros_like(X, dtype=np.complex64)
+    X = np.random.rand(n).astype(np.complex128) + 1j * np.random.rand(n).astype(np.complex128) 
+    Y_own = np.zeros_like(X, dtype=np.complex128)
 
 
-    own_fft(X, Y_own, N=N, K=K, R=R)
+    own_fft(X, Y_own, N=N, K=K, R=R, N_div_R=n_div_r)
     Y_np = fft(X)
     
     if dace.Config.get_bool('profiling'):
@@ -144,3 +140,6 @@ if __name__ == "__main__":
 
     print("==== Program end ====")
     exit(0 if diff <= 1e-3 else 1)
+
+
+
