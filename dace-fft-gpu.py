@@ -1,9 +1,10 @@
 #!/bin/bash
 
-import dace
-import os
 import numpy as np
+import dace
 from numpy.fft import fft
+import os
+
 
 N, R, K, N_div_R = (dace.symbol(name) for name in ['N','R','K','N_div_R'])
 
@@ -27,7 +28,7 @@ def own_fft(x, y):
         
         y_out = x_in
         
-    # Calculate indices CPU
+        # Calculate indices CPU
     c_r_i = dace.define_local([K], dtype=dace.int64)
     c_r_k_1 = dace.define_local([K], dtype=dace.int64)
     c_r_k_i_1 = dace.define_local([K], dtype=dace.int64)
@@ -64,7 +65,7 @@ def own_fft(x, y):
     for i in range(K):
         # STRIDE PERMUTATION AND TWIDDLE FACTOR MULTIPLICATION
         tmp_perm = dace.define_local([N], dtype=dtype)
-        @dace.map(_[0:R, 0:(R**i), 0:(R**(K-1))])
+        @dace.map(_[0:R, 0:c_r_i[i], 0:c_r_k_i_1[i]])
         def permute(ii, jj, kk):
             r_k_i_1_in << g_r_k_i_1[i]
             r_i_in << g_r_i[i]
@@ -81,7 +82,7 @@ def own_fft(x, y):
         # indices are calculated, R**(K-1) is not valid here either.
         x_packed = dace.define_local([R, N_div_R],dtype=dtype)
         y_packed = dace.define_local([R, N_div_R],dtype=dtype)
-        @dace.map(_[0:R, c_r_k_1[i]])
+        @dace.map(_[0:R, 0:N_div_R])
         def pack_matrices(ii, jj):
             g_r_k_1_in << g_r_k_1[i]
             tmp_in << tmp_perm[jj + ii * g_r_k_1_in]
@@ -91,7 +92,7 @@ def own_fft(x, y):
     
         y_packed[:] = dft_mat @ x_packed
             
-        @dace.map(_[0:R, c_r_k_1[i]])
+        @dace.map(_[0:R, 0:N_div_R])
         def unpack_matrices(ii, jj):
             g_r_k_1_in << g_r_k_1[i]
             y_out >> y[jj + ii * g_r_k_1_in]
@@ -108,7 +109,7 @@ if __name__ == "__main__":
     r = 2
     k = 4
     n = r ** k
-    n_div_r = r ** (k - 1) # Equivalent to n // r
+    n_div_r = n // r
     print('FFT on vector of length %d' % n)
 
     N.set(n)
@@ -120,7 +121,7 @@ if __name__ == "__main__":
     Y_own = np.zeros_like(X, dtype=np.complex128)
 
 
-    own_fft(X, Y_own, N=N, K=K, R=R, N_div_R=n_div_r)
+    own_fft(X, Y_own, N=N, K=K, R=R, N_div_R=N_div_R)
     Y_np = fft(X)
     
     if dace.Config.get_bool('profiling'):
@@ -140,6 +141,7 @@ if __name__ == "__main__":
 
     print("==== Program end ====")
     exit(0 if diff <= 1e-3 else 1)
+
 
 
 
